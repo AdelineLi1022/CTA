@@ -1,0 +1,8 @@
+{
+  "patient_id": "patient_id",
+  "cta": "registered_cta",
+  "lvo": "lvo_mask",
+  "cow": "cow_segmentation",
+  "space": "space",
+  "annotation_status": "annotation_status"
+}
