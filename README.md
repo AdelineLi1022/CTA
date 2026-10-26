@@ -6,6 +6,20 @@
 
 不把 149 个分片解释为 149 例，不假设所有空标注都是阴性，不根据最近的 CoW 标签自动生成血管节段真值。固定框是定位代理标签，不能用于血栓体积测量。本项目实现的是 ISLES'24 方法适配，不承诺复现原论文的指标或独立测试结果。
 
+## 已确认的本地 HF 字段与下一步（Linux）
+
+目前真实分片字段是 `subject_id`、`ncct`、`cta`、`lvo_mask`、`cow_segmentation`，影像为 `{bytes, path}` 结构。字段名不能证明 CTA 已配准；先检查一个病例。默认 Parquet 扫描现在仅搜索目录顶层，避免扫描同目录虚拟环境里的 PyArrow 测试分片。需要嵌套扫描时显式指定 `--pattern '**/*.parquet'`。
+
+```bash
+source /root/autodl-tmp/cta-venv/bin/activate
+cta-lvo inspect /root/autodl-tmp --pattern 'train-*.parquet' --output /root/autodl-tmp/isles_schema.json
+cta-lvo probe-isles /root/autodl-tmp --limit 1 --output /root/autodl-tmp/isles_probe.json
+```
+
+`probe-isles` 只读取指定病例的 NCCT、CTA、LVO、CoW 列，不解码其他模态，也不修改原始分片。报告包含 embedded path、shape、affine、spacing、毫米单位、mask 非零体素数量和相对 NCCT 的网格一致性。不同网格意味着不能直接用标签训练原始 CTA；相同网格仍需核对来源与影像叠加，不能自动宣称配准成功。空 LVO mask 仍不能自动作为阴性病例。
+
+文件名 `train-00000-of-00149.parquet` 只说明分片命名中的总数，不证明本地已经有 149 个分片；以 inspect 实际统计为准。
+
 ## 1. 在 Windows 上检查你的 Parquet
 
 在本项目根目录打开 PowerShell，建议使用 Python 3.12：

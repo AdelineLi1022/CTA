@@ -2,7 +2,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .data import inspect_parquet, import_parquet, read_json, write_json, split_cases
+from .data import inspect_parquet, import_parquet, read_json, write_json, split_cases, probe_isles
 from .geometry import audit_case
 from .export import export_dataset
 from .evaluation import evaluate
@@ -29,10 +29,17 @@ def main():
     p = sub.add_parser("inspect")
     p.add_argument("parquet_dir")
     p.add_argument("--output", required=True)
+    p.add_argument("--pattern", default="*.parquet", help="Relative glob; nonrecursive by default")
     p = sub.add_parser("import-parquet")
     p.add_argument("parquet_dir")
     p.add_argument("--mapping", required=True)
     p.add_argument("--output", required=True)
+    p.add_argument("--pattern", default="*.parquet")
+    p = sub.add_parser("probe-isles")
+    p.add_argument("parquet_dir")
+    p.add_argument("--output", required=True)
+    p.add_argument("--pattern", default="train-*.parquet")
+    p.add_argument("--limit", type=int, default=1)
     p = sub.add_parser("audit")
     p.add_argument("manifest")
     p.add_argument("--output", required=True)
@@ -82,9 +89,11 @@ def main():
         result = {"path": snapshot_download(repo_id=args.repo_id, repo_type="dataset",
                   revision=args.revision, local_dir=args.output, allow_patterns=["*.parquet", "*.json", "README.md"])}
     elif args.command == "inspect":
-        result = inspect_parquet(args.parquet_dir, args.output)
+        result = inspect_parquet(args.parquet_dir, args.output, args.pattern)
     elif args.command == "import-parquet":
-        result = import_parquet(args.parquet_dir, args.mapping, args.output)
+        result = import_parquet(args.parquet_dir, args.mapping, args.output, args.pattern)
+    elif args.command == "probe-isles":
+        result = probe_isles(args.parquet_dir, args.output, args.pattern, args.limit)
     elif args.command == "audit":
         reports = []
         for case in manifest_cases(args.manifest):

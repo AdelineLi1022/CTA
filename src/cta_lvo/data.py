@@ -3,6 +3,9 @@ import gzip
 import hashlib
 import json
 import re
+import tempfile
+
+import numpy as np
 from pathlib import Path
 
 import nibabel as nib
@@ -33,8 +36,16 @@ def nested(row, key):
     return row
 
 
-def inspect_parquet(root, output):
-    files = sorted(Path(root).rglob("*.parquet"))
+def parquet_files(root, pattern="*.parquet"):
+    # Nonrecursive by default: environments under the data root contain fixture Parquet files.
+    files = sorted(p for p in Path(root).glob(pattern) if p.is_file())
+    if not files:
+        raise ValueError(f"No Parquet shards match {pattern!r} in {root}")
+    return files
+
+
+def inspect_parquet(root, output, pattern="*.parquet"):
+    files = parquet_files(root, pattern)
     if not files:
         raise ValueError("No Parquet shards found")
     report = []
@@ -69,20 +80,21 @@ def materialize(value, destination, source_root):
     nib.save(image, destination)
 
 
-def import_parquet(root, mapping_file, output):
+def import_parquet(root, mapping_file, output, pattern="*.parquet"):
     root, output = Path(root).resolve(), Path(output).resolve()
     mapping = read_json(mapping_file)
     required = {"patient_id", "cta", "lvo", "cow", "space", "annotation_status"}
     if set(mapping) != required:
         raise ValueError(f"Mapping must contain exactly {sorted(required)}")
-    shards = sorted(root.rglob("*.parquet"))
+    shards = parquet_files(root, pattern)
     if not shards:
         raise ValueError("No Parquet shards found")
     # Do not overwrite an existing import, even after a partial failure.
     output.mkdir(parents=True, exist_ok=False)
     cases, seen = [], set()
     for shard in shards:
-        for batch in pq.ParquetFile(shard).iter_batches(batch_size=1):
+        columns = sorted({v.split(".")[0] for v in mapping.values() if isinstance(v, str)})
+        for batch in pq.ParquetFile(shard).iter_batches(batch_size=1, columns=columns):
             for row in batch.to_pylist():
                 pid = safe_id(nested(row, mapping["patient_id"]))
                 if pid in seen:
@@ -123,3 +135,54 @@ def split_cases(cases, seed=24):
         splits["val"].extend(ids[ntest:ntest+nval])
         splits["train"].extend(ids[ntest+nval:])
     return {k: sorted(v) for k, v in splits.items()}
+
+
+def probe_isles(root, output, pattern="train-*.parquet", limit=1):
+    """Inspect embedded NIfTI geometry without declaring registration or negatives."""
+    if limit < 1:
+        raise ValueError("limit must be positive")
+    root = Path(root).resolve()
+    reports = []
+    fields = ("ncct", "cta", "lvo_mask", "cow_segmentation")
+    with tempfile.TemporaryDirectory(prefix="cta_probe_") as temporary:
+        for shard in parquet_files(root, pattern):
+            parquet = pq.ParquetFile(shard)
+            columns = [k for k in ("subject_id", *fields) if k in parquet.schema_arrow.names]
+            for batch in parquet.iter_batches(batch_size=1, columns=columns):
+                for row in batch.to_pylist():
+                    report = {"file": str(shard), "subject_id": row.get("subject_id"), "images": {}}
+                    grids = {}
+                    for field in fields:
+                        value = row.get(field)
+                        if value is None or (isinstance(value, dict) and value.get("bytes") is None and not value.get("path")):
+                            report["images"][field] = {"present": False}
+                            continue
+                        detail = {"present": True, "embedded_path": value.get("path") if isinstance(value, dict) else None}
+                        try:
+                            target = Path(temporary) / f"{field}.nii.gz"
+                            materialize(value, target, root)
+                            img = nib.load(target)
+                            detail.update(shape=list(img.shape), spacing=nib.affines.voxel_sizes(img.affine).tolist(),
+                                          affine=img.affine.tolist(), units=img.header.get_xyzt_units()[0])
+                            grids[field] = (img.shape, img.affine.copy())
+                            if field in ("lvo_mask", "cow_segmentation"):
+                                data = img.get_fdata()
+                                labels, counts = np.unique(data, return_counts=True)
+                                detail["nonzero_voxels"] = int(np.count_nonzero(data))
+                                detail["label_counts"] = {str(float(k)): int(v) for k,v in zip(labels[:100], counts[:100])}
+                                detail["unique_labels"] = len(labels)
+                            del img
+                            target.unlink()
+                        except Exception as exc:
+                            detail["error"] = f"{type(exc).__name__}: {exc}"
+                        report["images"][field] = detail
+                    report["same_grid_as_ncct"] = {
+                        key: shape == grids["ncct"][0] and bool(np.allclose(affine, grids["ncct"][1], rtol=0, atol=1e-3))
+                        for key, (shape, affine) in grids.items() if key != "ncct" and "ncct" in grids
+                    }
+                    reports.append(report)
+                    if len(reports) >= limit:
+                        write_json(output, reports)
+                        return reports
+    write_json(output, reports)
+    return reports

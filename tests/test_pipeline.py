@@ -197,3 +197,30 @@ def test_automatic_cow_required_at_inference(case, tmp_path):
     export_dataset([case], {'train':['p001'], 'val':[], 'test':[]}, task, roi='cow-oracle')
     with pytest.raises(ValueError, match='automatic'):
         prepare_inference([case], task, tmp_path / 'inference' / task.name, roi='cow-auto')
+
+
+def test_scan_excludes_nested_environment_fixtures(tmp_path):
+    root = tmp_path / 'data'
+    root.mkdir()
+    pq.write_table(pa.table({'subject_id':['s1']}), root / 'train-00000.parquet')
+    fixtures = root / 'venv' / 'fixtures'
+    fixtures.mkdir(parents=True)
+    pq.write_table(pa.table({'price':[10]}), fixtures / 'unrelated.parquet')
+    assert inspect_parquet(root, tmp_path / 'schema.json')['shards'] == 1
+    assert inspect_parquet(root, tmp_path / 'recursive.json', '**/*.parquet')['shards'] == 2
+
+
+def test_isles_probe_actual_schema_and_misaligned_cta(case, tmp_path):
+    from cta_lvo.data import probe_isles
+    root = tmp_path / 'hf'
+    root.mkdir()
+    row = {'subject_id':'s1'}
+    for field, key in [('ncct','cta'), ('cta','cta'), ('lvo_mask','lvo'), ('cow_segmentation','cow')]:
+        row[field] = {'bytes': open(case[key], 'rb').read(), 'path': f'{field}.nii.gz'}
+    cta = image(np.zeros((12,12,12), dtype=np.float32))
+    row['cta']['bytes'] = gzip.compress(cta.to_bytes())
+    pq.write_table(pa.Table.from_pylist([row]), root / 'train-00000.parquet')
+    result = probe_isles(root, tmp_path / 'probe.json')[0]
+    assert result['same_grid_as_ncct'] == {'cta':False, 'lvo_mask':True, 'cow_segmentation':True}
+    assert result['images']['lvo_mask']['nonzero_voxels'] == 1
+    assert result['subject_id'] == 's1'
